@@ -1,31 +1,123 @@
-#!/bin/sh
-#Variables To Be Modified As Needed
+Amazon Linux 2 Setup:
+There are 2 parts of this process, Setup the repo "Controller" then Setup the local testing machine/client "Target".
 
-VmName="AAA"
-VmID="123"
-Date="$(date +%F)"
+Moving forwards we will reference the machine that clones the repo and runs Ansible on clients as the "Controller". and any the machine that Ansible executes on as the "Target". We will need to setup the target part first to get the IP of the target.
 
-#This Is The Directory Where The Backups Are Stored
-#cd /path/to/Directory/
+A) Setup the local testing machine/client "Target":
+Download and run AL2 locally using your preferred hyper-visor, for example KVM (linux) or VirtualBox (windows).
 
-#Turn Off The Machine
-sshpass -p<YOUR PASSWORD> ssh -o StrictHostKeyChecking=no root@<SERVER_IP> vim-cmd vmsvc/power.shutdown ${VmID}
-sleep 10m
+Download the KVM qcow2 image:
+https://cdn.amazonlinux.com/os-images/2.0.20200304.0/kvm/
 
-#Take A Backup With Date
-sudo ovftool -dm=thin vi://root:<YOUR PASSWORD>@<SERVER_IP> /${VmName}  /path/to/Directory/${VmName}_${Date}.ova
-sleep 1m
+Install KVM hypervisor and run a couple of checks, kvm-ok should output KVM acceleration can be used and the grep should show the # of cpu cores.
+sudo apt install qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils virtinst virt-manager cpu-checker
+kvm-ok
+grep -Eoc '(vmx|svm)' /proc/cpuinfo
+If you have issue with the last 2 commands, check your machine BIOS and ensure virtualisation technology is enabled.
 
-#Turn On The Machine
-sshpass -p<YOUR PASSWORD> ssh -o StrictHostKeyChecking=no root@<SERVER_IP> vim-cmd vmsvc/power.on ${VmID}
+Locate new program installed called Virtual Machine Manager --> open it --> File --> New VM --> Import existing disk image --> Browse --> Browse Local --> Select the downloaded file
+then in the same window choose the operation system as "Redhat Enterprise Linux 7" --> Keep pressing Forward and Accept the defaults till you reach Finish, and start the VM.
 
-#Test && Send Email If Needed
+Reset the VM root/ec2-user password by booting into grub menu press 'e'
+look at the line below that ro and change it with rw init=/sysroot/bin/sh look at the picture below, then when done press "Control + x" on your keyboard and give it some seconds to enter single mode.
 
-var1=$(7za t ${VmName}_${Date}.ova | grep -c  "Archives with Warnings: ")
-var2=0
+then run
 
-if [[ $var1 != $var2 ]]; then
-        mutt -s "Backup Failuer in "_${VmName} <YOUR EMAIL> </dev/null
-      
+chroot /sysroot
+passwd root
+touch /.autorelabel
+exit
+reboot 
+Now you can reboot and access with root user, notice first boot will connect to the internet and create the ec2-user, so wait for a couple of mins then try to login by pressing enter, then run
 
-fi
+passwd ec2-user
+Last steps is to take note of the IP of the test target and add ensure the controller can access the target using ssh by adding the controller SSH pub key to the target. Optionally
+edit etc/ssh/sshd_config to allow "PasswordAuthentication" and restart the sshd service, so you can go to the controller and run this and it work ask for password:
+
+ssh ec2-user@ansible_taget_ip
+
+It is highly recommended to take snapshot in this golden fresh target status. Shutdown the target and open Virtual Machine Manager and click the last icon on the right then the plus sign.
+B) Setup the repo "Controller":
+Install ansible and clone the repo :
+
+sudo apt install ansible
+git clone git@bitbucket.org:paramountcommercecom/ansible.git
+cd ansible
+Edit the following files:
+
+inv/qa --> add your targets IP.
+main.yml -> select the roles you wish to run by commenting out.
+vars/main.yml --> modify the vars to your desired output then encrypt it for better security. You will need to replace any entry labelled with "xxxxxxxx"
+vim inv/qa 
+vim main.yml
+vim vars/main.yml
+ansible-vault encrypt vars/main.yml
+Ensure that you can reach the target without issues, you should receive a pong
+
+ansible test -i inv/qa -m ping
+Run Ansible:
+
+ansible-playbook -i inv/qa -l kvm_test main.yml --extra-vars "@vars/main.yml" --ask-vault-pass
+Debian and Ubuntu AWX Setup:
+## Install AWX (Ansible) on Debian 10 "Buster"
+---
+
+### install some basic software
+apt-get update -y && sleep 5 && sudo apt-get upgrade -y && sleep 5 && sudo apt-get dist-upgrade -y
+apt install -y git python3-docker ansible-tower-cli gnupg2 nano htop nload mc
+
+sudo apt-get install -y \
+    apt-transport-https \
+    ca-certificates \
+    curl \
+    gnupg-agent \
+    software-properties-common
+    
+curl -fsSL https://download.docker.com/linux/debian/gpg | sudo apt-key add -
+add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/debian buster stable"
+
+### for ubuntu replace:
+### curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+### add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu bionic stable"
+
+apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose
+
+### start docker and enable autostart
+systemctl enable docker
+systemctl start docker
+
+### change default version of python to version 3
+python -V
+python3 -V
+update-alternatives --install /usr/bin/python python /usr/bin/python2.7 1
+update-alternatives --install /usr/bin/python python /usr/bin/python3 2
+
+### clone awx
+cd ~
+git clone https://github.com/ansible/awx
+cd ~/awx/installer
+
+### changes parameters
+nano inventory
+
+postgres_data_dir="/var/pgdocker"
+docker_compose_dir="/var/lib/awx"
+project_data_dir=/var/awx_projects
+
+### Due to errors, we now use latest Ansible 2.9.2 from Ubuntu repo:
+echo "deb http://ppa.launchpad.net/ansible/ansible/ubuntu bionic main" | tee -a /etc/apt/sources.list
+apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 93C4A3FD7BB9C367
+apt update
+apt install ansible -y
+ansible --version
+
+### install awx
+ansible-playbook install.yml -i inventory
+
+### ubuntu unable to load docker-compose error
+sudo apt install python-pip
+sudo apt install python3-pip
+pip install --upgrade setuptools
+pip install wheel
+pip install docker-compose
